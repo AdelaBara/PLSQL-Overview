@@ -1,0 +1,9 @@
+PPT sources/
+slides_extracted.json
+__pycache__/
+*.py[cod]
+.streamlit/secrets.toml
+.venv/
+venv/
+env/
+.env
