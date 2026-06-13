@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import streamlit as st
 
 
 BASE_DIR = Path(__file__).parent
+EXAMPLES_FILE = BASE_DIR / "exemple.json"
 AUTHOR_NAME = "Adela Bara"
 AUTHOR_CONTACT = "bara.adela@ie.ase.ro"
 
@@ -265,7 +267,7 @@ LESSONS = [
         "syntax": [
             ("Exception section", "EXCEPTION\n  WHEN NO_DATA_FOUND THEN\n    statements;\n  WHEN TOO_MANY_ROWS THEN\n    statements;\n  WHEN OTHERS THEN\n    statements;\nEND;"),
             ("Non-predefined exception", "DECLARE\n  insert_excep EXCEPTION;\n  PRAGMA EXCEPTION_INIT(insert_excep, -01400);\nBEGIN\n  -- code that can raise ORA-01400\nEXCEPTION\n  WHEN insert_excep THEN\n    DBMS_OUTPUT.PUT_LINE(SQLERRM);\nEND;\n/"),
-            ("Application error", "RAISE_APPLICATION_ERROR(-20202, 'This is not a valid manager');"),
+            ("Application error", "DECLARE\n    user_excep EXCEPTION;\n    PRAGMA EXCEPTION_INIT(user_excep, -20202);\nBEGIN\n    RAISE_APPLICATION_ERROR(-20202, 'This is not a valid manager');\nEND;"),
         ],
         "examples": [
             {
@@ -564,11 +566,12 @@ def render_exam_overview() -> None:
         {"Area": lesson["title"], "Must know": lesson["focus"]}
         for lesson in LESSONS
     ]
-    st.dataframe(rows, use_container_width=True, hide_index=True)
+    st.dataframe(rows, width="stretch", hide_index=True)
 
     st.subheader("Common Syntax To Memorize")
     st.code(
-        """DECLARE
+        """ -- PL/SQL blocks
+DECLARE
   -- declarations
 BEGIN
   -- executable statements
@@ -578,21 +581,46 @@ EXCEPTION
 END;
 /
 
+-- Using variables and SELECT INTO
 SELECT column_list INTO variable_list
 FROM table
 WHERE condition;
 
+--Exceptions
+EXCEPTION
+  WHEN NO_DATA_FOUND THEN
+    -- handle no rows
+  WHEN TOO_MANY_ROWS THEN
+    -- handle multiple rows
+  WHEN OTHERS THEN
+    -- handle all other exceptions
+    DBMS_OUTPUT.PUT_LINE('Error: ' || SQLERRM);
+    RAISE;
+
+-- Cursors
 CURSOR cursor_name IS select_statement;
 OPEN cursor_name;
 FETCH cursor_name INTO variables;
 CLOSE cursor_name;
 
+-- Procedures
 CREATE OR REPLACE PROCEDURE name IS
 BEGIN
   statements;
 END;
 /
 
+-- Functions
+CREATE OR REPLACE FUNCTION name(parameter datatype) RETURN datatype IS
+BEGIN
+  RETURN value;
+EXCEPTION
+  WHEN exception_name THEN
+    RETURN value;
+END;
+/
+
+-- Triggers
 CREATE OR REPLACE TRIGGER name
 BEFORE INSERT OR UPDATE OR DELETE ON table_name
 [FOR EACH ROW]
@@ -604,6 +632,44 @@ END;
     )
 
 
+@st.cache_data
+def load_course_examples(modified_time_ns: int) -> list[dict]:
+    del modified_time_ns
+    with EXAMPLES_FILE.open(encoding="utf-8-sig") as examples_file:
+        return json.load(examples_file)
+
+
+def render_course_examples() -> None:
+    st.title("Course Examples")
+    st.caption("Open SQL Developer or VS Code with Oracle extension to run these examples.")
+
+    try:
+        topics = load_course_examples(EXAMPLES_FILE.stat().st_mtime_ns)
+    except (OSError, json.JSONDecodeError) as error:
+        st.error(f"Could not load course examples: {error}")
+        return
+
+    if not topics:
+        st.info("No course examples are available.")
+        return
+
+    topic_names = [item["topic"] for item in topics]
+    selected_topic = st.selectbox("Choose a topic", topic_names)
+    topic = next(item for item in topics if item["topic"] == selected_topic)
+    examples = topic.get("examples", [])
+
+    st.subheader(selected_topic)
+    st.caption(f"{len(examples)} example{'s' if len(examples) != 1 else ''}")
+
+    for index, example in enumerate(examples, start=1):
+        with st.expander(f"{index}. {example['title']}", expanded=index == 1):
+            if example.get("description"):
+                st.write(example["description"])
+            if example.get("source"):
+                st.caption(f"Source: `{example['source']}`")
+            st.code(example.get("content", ""), language="sql")
+
+
 def main() -> None:
     st.set_page_config(page_title="PL/SQL Exam Recap", page_icon="DB", layout="wide")
     apply_custom_style()
@@ -612,7 +678,7 @@ def main() -> None:
     st.sidebar.caption("Built from the PPT files: Oracle PL/SQL Fundamentals I - Les01.ppt to Les11.ppt")
     render_author_card()
     st.sidebar.divider()
-    page_options = ["Exam overview"] + [lesson["title"] for lesson in LESSONS]
+    page_options = ["Exam overview"] + [lesson["title"] for lesson in LESSONS] +["Course examples"]
     selected = st.sidebar.radio("Choose a page", page_options)
 
     st.sidebar.divider()
@@ -624,6 +690,11 @@ def main() -> None:
         st.caption(f"Prepared by {AUTHOR_NAME} | {AUTHOR_CONTACT}")
         st.write("Use these pages as a short revision guide before the exam. Each lesson keeps the key definitions, syntax patterns, and examples from the original slides.")
         render_exam_overview()
+        render_footer()
+        return
+
+    if selected == "Course examples":
+        render_course_examples()
         render_footer()
         return
 
