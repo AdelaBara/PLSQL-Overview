@@ -4,9 +4,11 @@ Streamlit app with short PL/SQL exam recap pages: definitions, syntax, slide-bas
 
 The app is self-contained for deployment. The original PowerPoint source files are not required.
 
+https://plsql-overview-recap.streamlit.app/
+
 ## Run
 
 ```powershell
-C:\Users\simon\AppData\Local\Programs\Python\Python311\python.exe -m pip install -r requirements.txt
-C:\Users\simon\AppData\Local\Programs\Python\Python311\python.exe -m streamlit run app.py
+pip install -r requirements.txt
+streamlit run app.py
 ```
