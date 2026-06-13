@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import random
+import re
 from pathlib import Path
 
 import streamlit as st
@@ -512,6 +514,7 @@ def render_author_card() -> None:
             <div class="label">Course recap prepared by</div>
             <div class="name">PhD Professor {AUTHOR_NAME}</div>
             <div class="contact">{AUTHOR_CONTACT}</div>
+            <div class="website"><a href="https://adela-bara.ase.ro/" target="_blank">https://adela-bara.ase.ro/</a></div>
         </div>
         """,
         unsafe_allow_html=True,
@@ -520,7 +523,7 @@ def render_author_card() -> None:
 
 def render_footer() -> None:
     st.markdown(
-        f'<div class="footer-note">Prepared by <strong>PhD Professor {AUTHOR_NAME}</strong> | {AUTHOR_CONTACT}</div>',
+        f'<div class="footer-note">Prepared by <strong>PhD Professor {AUTHOR_NAME}</strong> | {AUTHOR_CONTACT} | 2026</div>',
         unsafe_allow_html=True,
     )
 
@@ -639,6 +642,214 @@ def load_course_examples(modified_time_ns: int) -> list[dict]:
         return json.load(examples_file)
 
 
+def split_sql_into_chunks(lines: list[str], maximum_chunks: int = 6) -> list[str]:
+    if not lines:
+        return []
+
+    chunk_count = min(maximum_chunks, len(lines))
+    chunk_size, remainder = divmod(len(lines), chunk_count)
+    chunks = []
+    start = 0
+
+    for index in range(chunk_count):
+        end = start + chunk_size + (1 if index < remainder else 0)
+        chunks.append("\n".join(lines[start:end]))
+        start = end
+
+    return chunks
+
+
+def build_topic_puzzles(topic: dict) -> list[dict]:
+    examples = topic.get("examples", [])
+    if not examples:
+        return []
+
+    puzzles = []
+
+    for puzzle_index in range(2):
+        example = examples[puzzle_index % len(examples)]
+        lines = [
+            line.rstrip()
+            for line in example.get("content", "").splitlines()
+            if line.strip()
+        ]
+
+        if len(examples) == 1 and len(lines) >= 12:
+            midpoint = len(lines) // 2
+            lines = lines[:midpoint] if puzzle_index == 0 else lines[midpoint:]
+
+        chunks = split_sql_into_chunks(lines)
+        if not chunks:
+            continue
+
+        shuffled_indices = list(range(len(chunks)))
+        random.Random(f"{topic['topic']}:{puzzle_index}").shuffle(shuffled_indices)
+        if shuffled_indices == list(range(len(chunks))):
+            shuffled_indices.reverse()
+
+        shuffled_commands = [
+            {
+                "label": chr(ord("A") + label_index),
+                "content": chunks[chunk_index],
+                "original_index": chunk_index,
+            }
+            for label_index, chunk_index in enumerate(shuffled_indices)
+        ]
+        correct_order = [
+            command["label"]
+            for command in sorted(
+                shuffled_commands, key=lambda command: command["original_index"]
+            )
+        ]
+        puzzles.append(
+            {
+                "title": example["title"],
+                "source": example.get("source", ""),
+                "commands": shuffled_commands,
+                "correct_order": correct_order,
+            }
+        )
+
+    return puzzles
+
+
+def meaningful_sql_lines(content: str) -> list[str]:
+    return [
+        line.strip()
+        for line in content.splitlines()
+        if line.strip()
+        and not line.lstrip().startswith("--")
+        and line.strip() != "/"
+    ]
+
+
+BUG_CONTEXT_ANCHORS = {
+    "Cursors": re.compile(r"^\s*cursor\b", re.IGNORECASE),
+    "Exceptions": re.compile(r"^\s*exception\s*$", re.IGNORECASE),
+    "Packages": re.compile(
+        r"^\s*create\s+or\s+replace\s+package(?:\s+body)?\b", re.IGNORECASE
+    ),
+    "Procedures": re.compile(
+        r"^\s*create\s+or\s+replace\s+procedure\b", re.IGNORECASE
+    ),
+    "Functions": re.compile(
+        r"^\s*create\s+or\s+replace\s+function\b", re.IGNORECASE
+    ),
+    "Triggers": re.compile(
+        r"^\s*create\s+or\s+replace\s+trigger\b", re.IGNORECASE
+    ),
+}
+
+
+def find_bug_context(
+    topic_name: str, lines: list[str], challenge_index: int
+) -> tuple[int, int] | None:
+    anchor_pattern = BUG_CONTEXT_ANCHORS.get(topic_name)
+    if not anchor_pattern:
+        return None
+
+    anchor_indices = [
+        index
+        for index, line in enumerate(lines)
+        if not line.lstrip().startswith("--") and anchor_pattern.search(line)
+    ]
+    if not anchor_indices:
+        return None
+
+    anchor_index = anchor_indices[challenge_index % len(anchor_indices)]
+    next_anchor = next(
+        (index for index in anchor_indices if index > anchor_index),
+        len(lines),
+    )
+    unit_end = next_anchor
+    for index in range(anchor_index + 1, next_anchor):
+        if lines[index].strip() == "/":
+            unit_end = index + 1
+            break
+
+    return anchor_index, unit_end
+
+
+def build_bug_challenges(topic: dict) -> list[dict]:
+    examples = topic.get("examples", [])
+    if not examples:
+        return []
+
+    distractor_pool = []
+    for example in examples:
+        distractor_pool.extend(meaningful_sql_lines(example.get("content", "")))
+
+    challenges = []
+    for challenge_index in range(2):
+        example = examples[challenge_index % len(examples)]
+        original_lines = example.get("content", "").splitlines()
+        context_bounds = find_bug_context(
+            topic["topic"], original_lines, challenge_index
+        )
+        if not context_bounds:
+            continue
+        context_start, unit_end = context_bounds
+
+        candidate_indices = [
+            index
+            for index, line in enumerate(original_lines[context_start + 1 : unit_end])
+            if line.strip()
+            and not line.lstrip().startswith("--")
+            and line.strip() != "/"
+        ]
+        candidate_indices = [
+            index + context_start + 1
+            for index in candidate_indices
+        ]
+        if not candidate_indices:
+            continue
+
+        target_position = random.Random(
+            f"bug-target:{topic['topic']}:{challenge_index}"
+        ).randrange(len(candidate_indices))
+        missing_index = candidate_indices[target_position]
+        missing_line = original_lines[missing_index].strip()
+
+        context_end = min(unit_end, missing_index + 6)
+        broken_lines = original_lines[context_start:context_end]
+        marker_index = missing_index - context_start
+        indentation = original_lines[missing_index][
+            : len(original_lines[missing_index]) - len(original_lines[missing_index].lstrip())
+        ]
+        broken_lines[marker_index] = f"{indentation}-- ??? MISSING LINE ???"
+
+        distractors = []
+        for line in distractor_pool:
+            if line != missing_line and line not in distractors:
+                distractors.append(line)
+        random.Random(f"bug-distractors:{topic['topic']}:{challenge_index}").shuffle(
+            distractors
+        )
+        options = [missing_line] + distractors[:3]
+        random.Random(f"bug-options:{topic['topic']}:{challenge_index}").shuffle(options)
+        labeled_options = [
+            {"label": chr(ord("A") + index), "content": option}
+            for index, option in enumerate(options)
+        ]
+        correct_label = next(
+            option["label"]
+            for option in labeled_options
+            if option["content"] == missing_line
+        )
+
+        challenges.append(
+            {
+                "title": example["title"],
+                "source": example.get("source", ""),
+                "broken_code": "\n".join(broken_lines),
+                "options": labeled_options,
+                "correct_label": correct_label,
+            }
+        )
+
+    return challenges
+
+
 def render_course_examples() -> None:
     st.title("Course Examples")
     st.caption("Open SQL Developer or VS Code with Oracle extension to run these examples.")
@@ -670,6 +881,135 @@ def render_course_examples() -> None:
             st.code(example.get("content", ""), language="sql")
 
 
+def render_code_puzzles() -> None:
+    st.title("Code Puzzles")
+    st.write("Arrange the shuffled SQL commands in the order used by the original example.")
+
+    try:
+        topics = load_course_examples(EXAMPLES_FILE.stat().st_mtime_ns)
+    except (OSError, json.JSONDecodeError) as error:
+        st.error(f"Could not load course examples: {error}")
+        return
+
+    topics = [topic for topic in topics if topic.get("examples")]
+    if not topics:
+        st.info("No examples are available for puzzles.")
+        return
+
+    selected_topic = st.selectbox(
+        "Choose a topic",
+        [topic["topic"] for topic in topics],
+        key="puzzle-topic",
+    )
+    topic = next(topic for topic in topics if topic["topic"] == selected_topic)
+    puzzles = build_topic_puzzles(topic)
+    if len(puzzles) < 2:
+        st.error("This topic does not contain enough SQL content to build two puzzles.")
+        return
+
+    puzzle_number = st.radio(
+        "Choose a puzzle",
+        [1, 2],
+        horizontal=True,
+        format_func=lambda number: f"Puzzle {number}",
+        key=f"puzzle-number-{selected_topic}",
+    )
+    puzzle = puzzles[puzzle_number - 1]
+
+    st.subheader(puzzle["title"])
+    if puzzle["source"]:
+        st.caption(f"Based on: `{puzzle['source']}`")
+    st.info("Each labeled block is one command group. Select each label exactly once.")
+
+    for command in puzzle["commands"]:
+        st.markdown(f"**Command {command['label']}**")
+        st.code(command["content"], language="sql")
+
+    labels = [command["label"] for command in puzzle["commands"]]
+    form_key = f"puzzle-form-{selected_topic}-{puzzle_number}"
+    with st.form(form_key):
+        selected_order = [
+            st.selectbox(
+                f"Position {position}",
+                ["Choose a command"] + labels,
+                key=f"{form_key}-position-{position}",
+            )
+            for position in range(1, len(labels) + 1)
+        ]
+        submitted = st.form_submit_button("Check answer")
+
+    if submitted:
+        if "Choose a command" in selected_order or len(set(selected_order)) != len(labels):
+            st.error("Fail. Select every command exactly once.")
+        elif selected_order == puzzle["correct_order"]:
+            st.success("Success! The commands are in the correct order.")
+        else:
+            st.error("Fail. The commands are not in the correct order.")
+
+
+def render_find_the_bug() -> None:
+    st.title("Find the Bug")
+    st.write("Find the line removed from the original SQL example.")
+
+    try:
+        topics = load_course_examples(EXAMPLES_FILE.stat().st_mtime_ns)
+    except (OSError, json.JSONDecodeError) as error:
+        st.error(f"Could not load course examples: {error}")
+        return
+
+    topics = [topic for topic in topics if topic.get("examples")]
+    if not topics:
+        st.info("No examples are available for bug challenges.")
+        return
+
+    selected_topic = st.selectbox(
+        "Choose a topic",
+        [topic["topic"] for topic in topics],
+        key="bug-topic",
+    )
+    topic = next(topic for topic in topics if topic["topic"] == selected_topic)
+    challenges = build_bug_challenges(topic)
+    if len(challenges) < 2:
+        st.error("This topic does not contain enough SQL content for two challenges.")
+        return
+
+    challenge_number = st.radio(
+        "Choose a challenge",
+        [1, 2],
+        horizontal=True,
+        format_func=lambda number: f"Challenge {number}",
+        key=f"bug-number-{selected_topic}",
+    )
+    challenge = challenges[challenge_number - 1]
+
+    st.subheader(challenge["title"])
+    if challenge["source"]:
+        st.caption(f"Based on: `{challenge['source']}`")
+    st.code(challenge["broken_code"], language="sql")
+
+    st.markdown("**Which line is missing?**")
+    for option in challenge["options"]:
+        st.markdown(f"**Option {option['label']}**")
+        st.code(option["content"], language="sql")
+
+    form_key = f"bug-form-{selected_topic}-{challenge_number}"
+    with st.form(form_key):
+        selected_answer = st.selectbox(
+            "Your answer",
+            ["Choose an option"] + [
+                option["label"] for option in challenge["options"]
+            ],
+            key=f"{form_key}-answer",
+        )
+        submitted = st.form_submit_button("Check answer")
+
+    if submitted:
+        if selected_answer == challenge["correct_label"]:
+            st.success("Success! You found the missing line.")
+        else:
+            st.error("Fail. That is not the missing line.")
+
+
 def main() -> None:
     st.set_page_config(page_title="PL/SQL Exam Recap", page_icon="DB", layout="wide")
     apply_custom_style()
@@ -678,7 +1018,11 @@ def main() -> None:
     st.sidebar.caption("Built from the PPT files: Oracle PL/SQL Fundamentals I - Les01.ppt to Les11.ppt")
     render_author_card()
     st.sidebar.divider()
-    page_options = ["Exam overview"] + [lesson["title"] for lesson in LESSONS] +["Course examples"]
+    page_options = (
+        ["Exam overview"]
+        + [lesson["title"] for lesson in LESSONS]
+        + ["Course examples", "Code puzzles", "Find the bug"]
+    )
     selected = st.sidebar.radio("Choose a page", page_options)
 
     st.sidebar.divider()
@@ -695,6 +1039,16 @@ def main() -> None:
 
     if selected == "Course examples":
         render_course_examples()
+        render_footer()
+        return
+
+    if selected == "Code puzzles":
+        render_code_puzzles()
+        render_footer()
+        return
+
+    if selected == "Find the bug":
+        render_find_the_bug()
         render_footer()
         return
 
